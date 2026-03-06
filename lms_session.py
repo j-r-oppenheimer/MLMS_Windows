@@ -7,6 +7,9 @@ from urllib.parse import quote
 from pathlib import Path
 from datetime import datetime, timedelta
 
+CACHE_DIR = Path.home() / ".mlms_windows"
+CACHE_FILE = CACHE_DIR / "events_cache.json"
+
 from PyQt6.QtCore import QObject, QUrl, QTimer, pyqtSignal
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import (
@@ -54,11 +57,31 @@ class LmsSession(QObject):
         self._injected = False
         self._login_timer = None
         self._poll_count = 0
+        self._all_events: list[dict] = self._load_disk_cache()  # 전체 이벤트 캐시
 
         self._page.loadFinished.connect(self._on_load_finished)
 
         # 다운로드 핸들
         self._profile.downloadRequested.connect(self._on_download_requested)
+
+    @staticmethod
+    def _load_disk_cache() -> list[dict]:
+        try:
+            if CACHE_FILE.exists():
+                with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            pass
+        return []
+
+    @staticmethod
+    def _save_disk_cache(events: list[dict]):
+        try:
+            CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            with open(CACHE_FILE, "w", encoding="utf-8") as f:
+                json.dump(events, f, ensure_ascii=False)
+        except OSError:
+            pass
 
     # ── 로그인 ──────────────────────────────────────
 
@@ -121,10 +144,16 @@ class LmsSession(QObject):
 
     # ── 시간표 로드 ─────────────────────────────────
 
-    def load_week_events(self, week_start: datetime):
-        """주어진 주의 시간표 이벤트를 로드한다."""
-        self._week_start = week_start
-        self._week_end = week_start + timedelta(days=6)
+    def get_cached_week(self, week_start: datetime) -> list[dict] | None:
+        """캐시에서 해당 주차 이벤트를 필터링해 반환. 캐시가 없으면 None."""
+        if not self._all_events:
+            return None
+        ws = week_start.strftime("%Y-%m-%d")
+        we = (week_start + timedelta(days=6)).strftime("%Y-%m-%d")
+        return [e for e in self._all_events if ws <= e.get("date", "") <= we]
+
+    def load_all_events(self):
+        """FullCalendar의 전체 이벤트를 한 번에 로드한다."""
         self._poll_count = 0
 
         # 로그인 타이머가 남아있으면 확실히 정리
@@ -133,7 +162,7 @@ class LmsSession(QObject):
 
         current = self._page.url().toString()
         if "MYscheduleMST" in current:
-            self._navigate_to_week()
+            QTimer.singleShot(500, self._poll_all_events)
         else:
             try:
                 self._page.loadFinished.disconnect()
@@ -159,57 +188,37 @@ class LmsSession(QObject):
             self.events_failed.emit("세션 만료")
             return
 
-        QTimer.singleShot(500, self._navigate_to_week)
+        QTimer.singleShot(500, self._poll_all_events)
 
-    def _navigate_to_week(self):
-        ws = self._week_start.strftime("%Y-%m-%d")
-        js = f"""
-        (function() {{
-            try {{
-                var jq = window.jQuery || window.$;
-                jq('.fc').fullCalendar('gotoDate', '{ws}');
-                return 'ok';
-            }} catch(e) {{ return 'err:' + e; }}
-        }})()
-        """
-        self._page.runJavaScript(js, 0, lambda _: QTimer.singleShot(500, self._poll_events))
-
-    def _poll_events(self):
-        ws = self._week_start.strftime("%Y-%m-%d")
-        we = self._week_end.strftime("%Y-%m-%d")
-        js = f"""
-        (function() {{
-            try {{
+    def _poll_all_events(self):
+        """날짜 필터 없이 전체 clientEvents를 추출."""
+        js = """
+        (function() {
+            try {
                 var fcEl = document.querySelector('.fc');
                 if (!fcEl) return JSON.stringify([]);
                 var jq = window.jQuery || window.$;
                 if (!jq) return JSON.stringify([]);
                 var events = jq(fcEl).fullCalendar('clientEvents');
                 if (!events || events.length === 0) return JSON.stringify([]);
-                var start = '{ws}';
-                var end   = '{we}';
                 return JSON.stringify(events
-                    .filter(function(e) {{
-                        if (!e.start) return false;
-                        var d = e.start.format('YYYY-MM-DD');
-                        return d >= start && d <= end;
-                    }})
-                    .map(function(e) {{
-                        return {{
+                    .filter(function(e) { return !!e.start; })
+                    .map(function(e) {
+                        return {
                             title: e.title || '',
                             start: e.start.format('YYYY-MM-DDTHH:mm:ss'),
                             end:   e.end ? e.end.format('YYYY-MM-DDTHH:mm:ss') : '',
                             url:   e.url || ''
-                        }};
-                    }}));
-            }} catch(ex) {{
-                return JSON.stringify([{{"error": String(ex)}}]);
-            }}
-        }})()
+                        };
+                    }));
+            } catch(ex) {
+                return JSON.stringify([{"error": String(ex)}]);
+            }
+        })()
         """
-        self._page.runJavaScript(js, 0, self._on_events_result)
+        self._page.runJavaScript(js, 0, self._on_all_events_result)
 
-    def _on_events_result(self, result):
+    def _on_all_events_result(self, result):
         try:
             events = json.loads(result) if isinstance(result, str) else (result or [])
         except (json.JSONDecodeError, TypeError):
@@ -217,7 +226,7 @@ class LmsSession(QObject):
 
         if not events and self._poll_count < 10:
             self._poll_count += 1
-            QTimer.singleShot(300, self._poll_events)
+            QTimer.singleShot(300, self._poll_all_events)
             return
 
         if events and len(events) == 1 and "error" in events[0]:
@@ -225,6 +234,8 @@ class LmsSession(QObject):
             return
 
         parsed = self._parse_events(events)
+        self._all_events = parsed
+        self._save_disk_cache(parsed)
         self.events_loaded.emit(parsed)
 
     # ── 이벤트 파싱 ─────────────────────────────────
@@ -299,6 +310,13 @@ class LmsSession(QObject):
         if not ok:
             self.detail_failed.emit("상세 페이지 로드 실패")
             return
+
+        # 세션 만료로 로그인 페이지로 리다이렉트된 경우
+        url = self._detail_page.url().toString()
+        if "/login" in url:
+            self.detail_failed.emit("세션 만료")
+            return
+
         # 1500ms 대기 후 JS 추출 (렌더링 대기)
         QTimer.singleShot(1500, self._extract_lesson_detail)
 
