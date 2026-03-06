@@ -19,7 +19,7 @@
 
 ## 스크린샷
 
-<img width="500" alt="image" src="https://github.com/user-attachments/assets/34d32f47-a8c6-4b21-bfaa-16fc83ea2d8f" />
+<img width="730" height="897" alt="스크린샷 2026-03-05 233348" src="https://github.com/user-attachments/assets/acc2a76d-3473-4f0b-bdbe-8fc624d3ddf0" />
 
 ## 빌드
 
