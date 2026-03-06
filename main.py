@@ -99,6 +99,13 @@ class MLMSApp:
         self.tray.setContextMenu(menu)
 
     def start(self):
+        # 디스크 캐시가 있으면 즉시 위젯에 표시
+        week_start = self.widget.current_week_start()
+        cached = self.session.get_cached_week(week_start)
+        if cached:
+            self.widget.set_classes(cached)
+            self.widget.show()
+
         creds = LoginDialog.get_saved_credentials(self.config)
         if creds:
             self._username, self._password = creds
@@ -129,7 +136,18 @@ class MLMSApp:
         auto = getattr(self, '_auto_login', self.config["auto_login"])
         LoginDialog(self.config).save_credentials(self._username, self._password, auto)
 
-        self._load_current_week()
+        # 세션 만료 후 재로그인된 경우 — 대기 중인 상세 요청 재시도
+        if getattr(self, '_pending_relogin_detail', False) and self._detail_dialog:
+            self._pending_relogin_detail = False
+            ci = self._detail_dialog.class_info
+            lp_seq = ci.get("lp_seq")
+            curr_seq = ci.get("curr_seq")
+            aca_seq = ci.get("aca_seq")
+            if lp_seq and curr_seq and aca_seq:
+                self.session.load_lesson_detail(lp_seq, curr_seq, aca_seq)
+            return
+
+        self._load_all()
         self.widget.show()
 
     def _on_login_failed(self, msg: str):
@@ -145,16 +163,25 @@ class MLMSApp:
 
     # ── 시간표 ──────────────────────────────────
 
-    def _load_current_week(self):
-        week_start = self.widget.current_week_start()
-        self.session.load_week_events(week_start)
+    def _load_all(self):
+        """전체 이벤트를 한 번에 로드."""
+        self.session.load_all_events()
 
     def _on_week_changed(self, week_start: datetime):
-        if self._logged_in:
-            self.session.load_week_events(week_start)
+        """주차 이동 — 캐시에서 즉시 표시, 캐시 없으면 네트워크 로드."""
+        if not self._logged_in:
+            return
+        cached = self.session.get_cached_week(week_start)
+        if cached is not None:
+            self.widget.set_classes(cached)
+        else:
+            self.session.load_all_events()
 
-    def _on_events_loaded(self, events: list):
-        self.widget.set_classes(events)
+    def _on_events_loaded(self, all_events: list):
+        """전체 이벤트 로드 완료 — 현재 보고 있는 주차만 필터링해서 표시."""
+        week_start = self.widget.current_week_start()
+        cached = self.session.get_cached_week(week_start)
+        self.widget.set_classes(cached if cached is not None else [])
 
     def _on_events_failed(self, msg: str):
         if "세션 만료" in msg and self._username and self._password:
@@ -164,8 +191,9 @@ class MLMSApp:
         self.tray.showMessage("MLMS", f"시간표 로드 실패: {msg}", QSystemTrayIcon.MessageIcon.Warning)
 
     def _refresh(self):
+        """백그라운드 갱신 — 새 데이터를 가져와서 변경 시에만 위젯 업데이트."""
         if self._logged_in:
-            self._load_current_week()
+            self.session.load_all_events()
 
     # ── 수업 상세 + 파일 다운로드 ───────────────
 
@@ -202,6 +230,12 @@ class MLMSApp:
             self._detail_dialog.set_detail(detail)
 
     def _on_detail_failed(self, msg: str):
+        if "세션 만료" in msg and self._username and self._password:
+            # 재로그인 후 상세 재시도
+            self._pending_relogin_detail = True
+            self._logged_in = False
+            self.session.login(self._username, self._password)
+            return
         if self._detail_dialog:
             self._detail_dialog.set_detail_error(msg)
 
