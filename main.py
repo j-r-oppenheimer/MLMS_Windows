@@ -1,5 +1,6 @@
 """MLMS Windows 데스크톱 위젯 — 엔트리포인트."""
 
+import ctypes
 import os
 import sys
 from datetime import datetime
@@ -278,6 +279,11 @@ class MLMSApp:
 
 
 def main():
+    # 중복 실행 방지
+    mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "MLMS_Widget_Mutex_Lock")
+    if ctypes.windll.kernel32.GetLastError() == 183:
+        sys.exit(0)
+
     app = MLMSApp()
     sys.exit(app.start())
 

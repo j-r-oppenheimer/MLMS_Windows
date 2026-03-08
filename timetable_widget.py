@@ -487,12 +487,7 @@ class TimetableDesktopWidget(QWidget):
         elif self._drag_pos is not None:
             self.move((QCursor.pos() - self._drag_pos).toPoint())
 
-        if not self._resizing and self._drag_pos is None:
-            edge = self._edge_at(event.position())
-            self.setCursor(Qt.CursorShape.ArrowCursor)
-
     def mouseReleaseEvent(self, event):
-        was_dragging = self._drag_pos is not None
         was_resizing = self._resizing
         click_start = self._click_start_pos
 
