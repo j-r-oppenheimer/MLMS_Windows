@@ -517,4 +517,7 @@ class TimetableDesktopWidget(QWidget):
                         self.class_clicked.emit(raw)
 
     def mouseDoubleClickEvent(self, event):
+        # 수업 블록 위에서 더블클릭하면 무시
+        if self._hit_test(event.position()):
+            return
         self.go_this_week()
