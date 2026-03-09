@@ -90,28 +90,47 @@ class LmsSession(QObject):
         self._username = username
         self._password = password
         self._injected = False
+
+        # 이전 타이머 정리
+        if self._login_timer and self._login_timer.isActive():
+            self._login_timer.stop()
+
         self._page.load(QUrl(LOGIN_URL))
 
         self._login_timer = QTimer(self)
         self._login_timer.setSingleShot(True)
         self._login_timer.timeout.connect(lambda: self.login_failed.emit("로그인 시간 초과"))
-        self._login_timer.start(30_000)
+        self._login_timer.start(60_000)
 
     def _on_load_finished(self, ok: bool):
         url = self._page.url().toString()
+
+        # 페이지 로드 자체가 실패한 경우 (네트워크 오류 등)
+        if not ok and not self._injected:
+            if self._login_timer and self._login_timer.isActive():
+                self._login_timer.stop()
+            self.login_failed.emit("로그인 페이지 로드 실패 (네트워크 연결을 확인해주세요)")
+            return
 
         if "/login" in url and not self._injected:
             self._injected = True
             QTimer.singleShot(800, self._inject_credentials)
             return
 
+        # 자격증명 주입 후 다시 로그인 페이지로 돌아온 경우 (잘못된 비밀번호 등)
+        if "/login" in url and self._injected:
+            if self._login_timer and self._login_timer.isActive():
+                self._login_timer.stop()
+            self.login_failed.emit("로그인 실패 (아이디 또는 비밀번호를 확인해주세요)")
+            return
+
         if "/login" not in url and self._injected:
-            if self._login_timer:
+            if self._login_timer and self._login_timer.isActive():
                 self._login_timer.stop()
             self.login_success.emit()
             return
 
-    def _inject_credentials(self):
+    def _inject_credentials(self, retry_count=0):
         safe_id = self._username.replace("\\", "\\\\").replace("'", "\\'")
         safe_pw = self._password.replace("\\", "\\\\").replace("'", "\\'")
         js = f"""
@@ -140,7 +159,14 @@ class LmsSession(QObject):
             return 'no_submit_element';
         }})();
         """
-        self._page.runJavaScript(js)
+        self._inject_retry = retry_count
+        self._page.runJavaScript(js, 0, self._on_inject_result)
+
+    def _on_inject_result(self, result):
+        """자격증명 주입 결과 확인 — 필드를 못 찾으면 재시도."""
+        if result == "fields_not_found" and self._inject_retry < 5:
+            QTimer.singleShot(800, lambda: self._inject_credentials(self._inject_retry + 1))
+            return
 
     # ── 시간표 로드 ─────────────────────────────────
 
