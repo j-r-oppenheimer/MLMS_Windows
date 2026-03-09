@@ -302,6 +302,11 @@ class LmsSession(QObject):
     def load_lesson_detail(self, lp_seq: str, curr_seq: str, aca_seq: str):
         """수업 상세 페이지를 로드하고 과목명, 강의실, 파일 목록을 추출한다."""
         url = f"{SCHEDULE_SHOW_URL}?lp_seq={lp_seq}&curr_seq={curr_seq}&aca_seq={aca_seq}"
+        # 기존 연결 제거 후 새로 연결 (중복 연결 방지)
+        try:
+            self._detail_page.loadFinished.disconnect(self._on_detail_page_loaded)
+        except TypeError:
+            pass
         self._detail_page.loadFinished.connect(self._on_detail_page_loaded)
         self._detail_page.load(QUrl(url))
 

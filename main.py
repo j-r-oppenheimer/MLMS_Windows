@@ -207,8 +207,16 @@ class MLMSApp:
         curr_seq = class_info.get("curr_seq")
         aca_seq = class_info.get("aca_seq")
 
-        if lp_seq and curr_seq and aca_seq:
+        if not self._logged_in:
+            # 오프라인/미로그인 상태: 네트워크 요청 없이 기본 정보만 표시
+            dlg.set_detail({"subject": "", "room": "", "files": []})
+        elif lp_seq and curr_seq and aca_seq:
             # 비동기로 상세 로드
+            try:
+                self.session.detail_loaded.disconnect(self._on_detail_loaded)
+                self.session.detail_failed.disconnect(self._on_detail_failed)
+            except TypeError:
+                pass
             self.session.detail_loaded.connect(self._on_detail_loaded)
             self.session.detail_failed.connect(self._on_detail_failed)
             self.session.load_lesson_detail(lp_seq, curr_seq, aca_seq)
