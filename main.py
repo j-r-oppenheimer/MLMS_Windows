@@ -232,6 +232,16 @@ class MLMSApp:
             self.session.detail_failed.disconnect(self._on_detail_failed)
         except TypeError:
             pass
+        try:
+            dlg.file_download_requested.disconnect(self._on_file_download)
+        except TypeError:
+            pass
+        try:
+            self.session.download_finished.disconnect(self._on_download_finished)
+            self.session.download_failed.disconnect(self._on_download_failed)
+        except TypeError:
+            pass
+        self.session.cancel_pending_download()
         self._detail_dialog = None
 
     def _on_detail_loaded(self, detail: dict):

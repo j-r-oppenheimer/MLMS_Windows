@@ -57,6 +57,8 @@ class LmsSession(QObject):
         self._injected = False
         self._login_timer = None
         self._poll_count = 0
+        self._pending_download = None
+        self._active_download = None
         self._all_events: list[dict] = self._load_disk_cache()  # 전체 이벤트 캐시
 
         self._page.loadFinished.connect(self._on_load_finished)
@@ -451,6 +453,8 @@ class LmsSession(QObject):
     def _start_download(self):
         """read-receipt 후 실제 다운로드 시작."""
         info = self._pending_download
+        if not info:
+            return
         url = info["file_info"]["download_url"]
         self.download_started.emit(info["file_info"]["name"])
         # WebEngineView를 통해 다운로드 — 세션 쿠키가 자동으로 포함됨
@@ -458,7 +462,7 @@ class LmsSession(QObject):
 
     def _on_download_requested(self, download: QWebEngineDownloadRequest):
         """다운로드 요청 처리."""
-        info = getattr(self, "_pending_download", None)
+        info = self._pending_download
         if not info:
             download.cancel()
             return
@@ -476,16 +480,32 @@ class LmsSession(QObject):
 
         download.setDownloadDirectory(os.path.dirname(save_path))
         download.setDownloadFileName(os.path.basename(save_path))
+        self._active_download = download
         download.isFinishedChanged.connect(
             lambda: self._on_download_finished(download, save_path)
         )
         download.accept()
 
     def _on_download_finished(self, download: QWebEngineDownloadRequest, save_path: str):
+        self._active_download = None
+        try:
+            download.isFinishedChanged.disconnect()
+        except TypeError:
+            pass
         if download.state() == QWebEngineDownloadRequest.DownloadState.DownloadCompleted:
             self.download_finished.emit(save_path)
         else:
             self.download_failed.emit(f"다운로드 실패: {download.state()}")
+
+    def cancel_pending_download(self):
+        """진행 중인 다운로드 상태를 정리한다."""
+        self._pending_download = None
+        if getattr(self, "_active_download", None):
+            try:
+                self._active_download.isFinishedChanged.disconnect()
+            except TypeError:
+                pass
+            self._active_download = None
 
     def cleanup(self):
         """리소스 정리."""
