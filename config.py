@@ -44,9 +44,12 @@ class Config:
             self._data.setdefault(k, v)
 
     def save(self):
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(self._data, f, indent=2, ensure_ascii=False)
+        try:
+            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+                json.dump(self._data, f, indent=2, ensure_ascii=False)
+        except OSError:
+            pass
 
     def get(self, key: str):
         return self._data.get(key, DEFAULTS.get(key))

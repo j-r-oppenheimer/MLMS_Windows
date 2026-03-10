@@ -59,6 +59,7 @@ class LmsSession(QObject):
         self._poll_count = 0
         self._pending_download = None
         self._active_download = None
+        self._loading_events = False
         self._all_events: list[dict] = self._load_disk_cache()  # 전체 이벤트 캐시
 
         self._page.loadFinished.connect(self._on_load_finished)
@@ -182,6 +183,9 @@ class LmsSession(QObject):
 
     def load_all_events(self):
         """FullCalendar의 전체 이벤트를 한 번에 로드한다."""
+        if self._loading_events:
+            return
+        self._loading_events = True
         self._poll_count = 0
 
         # 로그인 타이머가 남아있으면 확실히 정리
@@ -207,12 +211,14 @@ class LmsSession(QObject):
         self._page.loadFinished.connect(self._on_load_finished)
 
         if not ok:
+            self._loading_events = False
             self.events_failed.emit("시간표 페이지 로드 실패")
             return
 
         # 세션 만료로 로그인 페이지로 리다이렉트된 경우
         url = self._page.url().toString()
         if "/login" in url:
+            self._loading_events = False
             self.events_failed.emit("세션 만료")
             return
 
@@ -258,9 +264,11 @@ class LmsSession(QObject):
             return
 
         if events and len(events) == 1 and "error" in events[0]:
+            self._loading_events = False
             self.events_failed.emit(events[0]["error"])
             return
 
+        self._loading_events = False
         parsed = self._parse_events(events)
         self._all_events = parsed
         self._save_disk_cache(parsed)

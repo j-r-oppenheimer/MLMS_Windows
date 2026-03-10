@@ -242,6 +242,8 @@ class TimetableDesktopWidget(QWidget):
         self.week_changed.emit(self.current_week_start())
 
     def go_this_week(self):
+        if self.week_offset == 0:
+            return
         self.week_offset = 0
         self.week_changed.emit(self.current_week_start())
 
@@ -345,6 +347,7 @@ class TimetableDesktopWidget(QWidget):
 
         # 수업 블록
         if not self.classes:
+            self._layout_map = {}
             p.setFont(self._font(max(int(h * 0.025), 10)))
             p.setPen(text_color)
             msg = "시간표 로딩 중…" if not hasattr(self, '_loaded') else "이번 주 수업이 없습니다"
@@ -496,13 +499,16 @@ class TimetableDesktopWidget(QWidget):
         self._resize_edge = 0
         self._click_start_pos = None
 
-        # 위치/크기 저장
+        # 위치/크기 저장 — 실제로 변경된 경우에만
         geo = self.geometry()
-        self.config["widget_x"] = geo.x()
-        self.config["widget_y"] = geo.y()
-        self.config["widget_w"] = geo.width()
-        self.config["widget_h"] = geo.height()
-        self.config.save()
+        gx, gy, gw, gh = geo.x(), geo.y(), geo.width(), geo.height()
+        if (gx != self.config["widget_x"] or gy != self.config["widget_y"]
+                or gw != self.config["widget_w"] or gh != self.config["widget_h"]):
+            self.config["widget_x"] = gx
+            self.config["widget_y"] = gy
+            self.config["widget_w"] = gw
+            self.config["widget_h"] = gh
+            self.config.save()
 
         # 클릭 판정 — 이동 거리가 5px 이내면 클릭으로 판정
         if event.button() == Qt.MouseButton.LeftButton and click_start and not was_resizing:
