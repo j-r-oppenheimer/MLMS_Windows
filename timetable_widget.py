@@ -189,6 +189,7 @@ class TimetableDesktopWidget(QWidget):
         """이벤트 데이터 설정. 원본 dict를 보존한다."""
         self._raw_classes = classes
         self.classes = []
+        self._layout_map = {}  # 즉시 클리어하여 stale 클릭 방지
         filter_mode = self.config["class_filter"]
         for c in classes:
             title = c.get("title", "")
@@ -446,7 +447,6 @@ class TimetableDesktopWidget(QWidget):
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             pos = event.position()
-            self._click_start_pos = pos
 
             header_h = self.height() * 0.03
             time_col_w = header_h
@@ -458,6 +458,7 @@ class TimetableDesktopWidget(QWidget):
                     self.go_next_week()
                     return
 
+            self._click_start_pos = pos
             edge = self._edge_at(pos)
             if edge:
                 self._resizing = True

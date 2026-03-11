@@ -176,6 +176,8 @@ class MLMSApp:
         if cached is not None:
             self.widget.set_classes(cached)
         else:
+            # 캐시 없으면 위젯을 즉시 비워서 stale 클릭 방지
+            self.widget.set_classes([])
             self.session.load_all_events()
 
     def _on_events_loaded(self, all_events: list):
