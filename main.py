@@ -187,6 +187,7 @@ class MLMSApp:
     def _on_week_changed(self, week_start: datetime):
         """주차 이동 — 캐시에서 즉시 표시, 캐시 없으면 네트워크 로드."""
         if not self._logged_in:
+            self.widget.set_classes([])  # stale 블록 방지
             return
         cached = self.session.get_cached_week(week_start)
         if cached is not None:
@@ -214,6 +215,8 @@ class MLMSApp:
 
     def _refresh(self):
         """백그라운드 갱신 — 새 데이터를 가져와서 변경 시에만 위젯 업데이트."""
+        # 주 경계를 넘겼으면 먼저 이번 주로 복귀 (week_changed → 캐시 표시)
+        self.widget.sync_week_to_today()
         if self._logged_in:
             self.session.load_all_events()
 

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from PyQt6.QtWidgets import QWidget
-from PyQt6.QtCore import Qt, QRectF, QPointF, pyqtSignal, QTimer
+from PyQt6.QtCore import Qt, QRectF, QPoint, QPointF, pyqtSignal, QTimer
 from PyQt6.QtGui import (
     QPainter, QColor, QFont, QFontMetricsF, QPen, QBrush, QCursor,
     QPainterPath,
@@ -16,6 +16,8 @@ from variant import INVERT_BLOCK_COLOR
 
 DAY_LABELS = ["월", "화", "수", "목", "금"]
 EXAM_KEYWORDS = ["시험", "중간", "기말", "평가"]
+# 키워드를 포함하지만 시험이 아닌 단어 — 매칭 전에 제거한다.
+EXAM_EXCLUDE_WORDS = ["시험관"]
 START_HOUR = 9
 END_HOUR = 18
 TOTAL_HOURS = END_HOUR - START_HOUR
@@ -56,7 +58,10 @@ def class_key(title: str, date: str, start_hour: int, start_min: int) -> str:
 
 
 def is_exam(title: str) -> bool:
-    return any(kw in title for kw in EXAM_KEYWORDS)
+    cleaned = title
+    for word in EXAM_EXCLUDE_WORDS:
+        cleaned = cleaned.replace(word, "")
+    return any(kw in cleaned for kw in EXAM_KEYWORDS)
 
 
 # 색상 휠(RYB) ↔ RGB 색상각 대응표 — 미술 색상환 기준 보색을 얻기 위한 것.
@@ -179,6 +184,10 @@ class TimetableDesktopWidget(QWidget):
         self.classes: list[ClassItem] = []
         self._raw_classes: list[dict] = []  # 원본 dict (seq 정보 포함)
         self.week_offset = 0
+        # week_offset이 기준 삼았던 "실제 달력상 이번 주 월요일".
+        # 앱을 켜둔 채 주가 넘어가면 넘겨봤던 주가 새 현재 주에 얹혀
+        # 한 주 더 밀리므로, 앵커가 달라지면 offset을 0으로 되돌린다.
+        self._week_anchor = self._real_week_monday()
         self._layout_map: dict[ClassItem, BlockLayout] = {}
 
         self.setWindowFlags(
@@ -194,7 +203,7 @@ class TimetableDesktopWidget(QWidget):
         )
         self.setMinimumSize(300, 300)
 
-        self._drag_pos: Optional[QPointF] = None
+        self._drag_pos: Optional[QPoint] = None
         self._resizing = False
         self._resize_edge = 0
         self._resize_start_geo = None
@@ -211,11 +220,14 @@ class TimetableDesktopWidget(QWidget):
             f.setBold(True)
         return f
 
-    def current_week_start(self) -> datetime:
+    def _real_week_monday(self) -> datetime:
+        """offset과 무관한, 오늘이 속한 주의 월요일."""
         today = datetime.now()
         monday = today - timedelta(days=today.weekday())
-        monday = monday.replace(hour=0, minute=0, second=0, microsecond=0)
-        return monday + timedelta(weeks=self.week_offset)
+        return monday.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    def current_week_start(self) -> datetime:
+        return self._real_week_monday() + timedelta(weeks=self.week_offset)
 
     def set_classes(self, classes: list[dict]):
         """이벤트 데이터 설정. 원본 dict를 보존한다."""
@@ -290,17 +302,45 @@ class TimetableDesktopWidget(QWidget):
                 return cls
         return None
 
+    def _clear_for_week_change(self):
+        """주 이동 직전 — stale 블록 클릭 방지."""
+        self.classes = []
+        self._raw_classes = []
+        self._layout_map = {}
+
     def go_prev_week(self):
+        self._clear_for_week_change()
         self.week_offset -= 1
+        self._week_anchor = self._real_week_monday()
         self.week_changed.emit(self.current_week_start())
 
     def go_next_week(self):
+        self._clear_for_week_change()
         self.week_offset += 1
+        self._week_anchor = self._real_week_monday()
         self.week_changed.emit(self.current_week_start())
 
     def go_this_week(self):
+        self._week_anchor = self._real_week_monday()
         if self.week_offset == 0:
             return
+        self._clear_for_week_change()
+        self.week_offset = 0
+        self.week_changed.emit(self.current_week_start())
+
+    def sync_week_to_today(self):
+        """실제 달력상 주가 바뀌었으면 이번 주로 되돌린다.
+
+        앱을 며칠씩 켜두는 상주 위젯이라, 다음 주를 보던 상태로 주 경계를
+        넘기면 현재 주가 이동한 만큼 표시 주차가 한 주 더 밀린다.
+        """
+        monday = self._real_week_monday()
+        if monday == self._week_anchor:
+            return
+        self._week_anchor = monday
+        if self.week_offset == 0:
+            return
+        self._clear_for_week_change()
         self.week_offset = 0
         self.week_changed.emit(self.current_week_start())
 
@@ -556,7 +596,8 @@ class TimetableDesktopWidget(QWidget):
             self.setGeometry(x, y, w, h)
             self.update()
         elif self._drag_pos is not None:
-            self.move((QCursor.pos() - self._drag_pos).toPoint())
+            # QCursor.pos()와 self.pos()는 모두 QPoint → 차이도 QPoint, 변환 불필요
+            self.move(QCursor.pos() - self._drag_pos)
 
     def mouseReleaseEvent(self, event):
         was_resizing = self._resizing
