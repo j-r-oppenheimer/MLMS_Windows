@@ -1,6 +1,7 @@
 """MLMS Windows 데스크톱 위젯 — 엔트리포인트."""
 
 import ctypes
+import logging
 import os
 import sys
 from datetime import datetime
@@ -11,7 +12,10 @@ from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QMessageBox
 from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor, QAction
 from PyQt6.QtCore import QTimer
 
+from crash_handler import setup_logging, install_excepthook
 from config import Config
+
+log = logging.getLogger("mlms.app")
 from lms_session import LmsSession
 from timetable_widget import TimetableDesktopWidget
 from login_dialog import LoginDialog
@@ -104,15 +108,18 @@ class MLMSApp:
         week_start = self.widget.current_week_start()
         cached = self.session.get_cached_week(week_start)
         if cached:
+            log.info("디스크 캐시에서 %d개 수업 표시", len(cached))
             self.widget.set_classes(cached)
             self.widget.show()
 
         creds = LoginDialog.get_saved_credentials(self.config)
         if creds:
             self._username, self._password = creds
+            log.info("저장된 자격증명으로 자동 로그인 시도: %s", self._username)
             self.tray.setToolTip("MLMS — 로그인 중…")
             self.session.login(self._username, self._password)
         else:
+            log.info("저장된 자격증명 없음 — 로그인 창 표시")
             self._show_login()
 
         return self.app.exec()
@@ -131,6 +138,7 @@ class MLMSApp:
             self.session.login(self._username, self._password)
 
     def _on_login_success(self):
+        log.info("로그인 성공: %s", self._username)
         self._logged_in = True
         self.tray.setToolTip(f"MLMS — {self._username}")
 
@@ -152,6 +160,7 @@ class MLMSApp:
         self.widget.show()
 
     def _on_login_failed(self, msg: str):
+        log.warning("로그인 실패: %s", msg)
         self.tray.setToolTip("MLMS — 로그인 실패")
         QMessageBox.warning(None, "MLMS 로그인 실패", msg)
         self._show_login()
@@ -182,12 +191,15 @@ class MLMSApp:
 
     def _on_events_loaded(self, all_events: list):
         """전체 이벤트 로드 완료 — 현재 보고 있는 주차만 필터링해서 표시."""
+        log.info("이벤트 로드 완료 — 전체 %d개", len(all_events))
         week_start = self.widget.current_week_start()
         cached = self.session.get_cached_week(week_start)
         self.widget.set_classes(cached if cached is not None else [])
 
     def _on_events_failed(self, msg: str):
+        log.warning("시간표 로드 실패: %s", msg)
         if "세션 만료" in msg and self._username and self._password:
+            log.info("세션 만료 — 재로그인 시도")
             self._logged_in = False
             self.session.login(self._username, self._password)
             return
@@ -202,7 +214,7 @@ class MLMSApp:
 
     def _on_class_clicked(self, class_info: dict):
         """수업 블록 클릭 → 상세 다이얼로그."""
-        dlg = ClassDetailDialog(class_info)
+        log.info("수업 클릭: %s", class_info.get("title", ""))
         self._detail_dialog = dlg
 
         lp_seq = class_info.get("lp_seq")
@@ -251,6 +263,7 @@ class MLMSApp:
             self._detail_dialog.set_detail(detail)
 
     def _on_detail_failed(self, msg: str):
+        log.warning("수업 상세 로드 실패: %s", msg)
         if "세션 만료" in msg and self._username and self._password:
             # 재로그인 후 상세 재시도
             self._pending_relogin_detail = True
@@ -267,6 +280,7 @@ class MLMSApp:
         self.session.download_file(file_info)
 
     def _on_download_finished(self, path: str):
+        log.info("다운로드 완료: %s", path)
         self.session.download_finished.disconnect(self._on_download_finished)
         self.session.download_failed.disconnect(self._on_download_failed)
         if self._detail_dialog:
@@ -274,6 +288,7 @@ class MLMSApp:
         self.tray.showMessage("MLMS", f"다운로드 완료: {path}", QSystemTrayIcon.MessageIcon.Information)
 
     def _on_download_failed(self, msg: str):
+        log.warning("다운로드 실패: %s", msg)
         try:
             self.session.download_finished.disconnect(self._on_download_finished)
             self.session.download_failed.disconnect(self._on_download_failed)
@@ -293,15 +308,21 @@ class MLMSApp:
             self.refresh_timer.start(interval_ms)
 
     def _quit(self):
+        log.info("=== MLMS 종료 ===")
         self.widget.hide()
         self.tray.hide()
         self.app.quit()
 
 
 def main():
+    log_file = setup_logging()
+    install_excepthook()
+    log.info("=== MLMS 시작 === (로그 파일: %s)", log_file)
+
     # 중복 실행 방지
     mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "MLMS_Widget_Mutex_Lock")
     if ctypes.windll.kernel32.GetLastError() == 183:
+        log.info("이미 실행 중인 인스턴스가 있어 종료합니다.")
         sys.exit(0)
 
     app = MLMSApp()

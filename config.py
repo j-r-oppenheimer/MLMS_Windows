@@ -1,11 +1,14 @@
 """설정 관리 — JSON 파일 기반."""
 
 import json
+import logging
 import os
 from pathlib import Path
 
 CONFIG_DIR = Path.home() / ".mlms_windows"
 CONFIG_FILE = CONFIG_DIR / "config.json"
+
+log = logging.getLogger("mlms.config")
 
 DEFAULTS = {
     "bg_alpha": 200,          # 배경 투명도 (0~255)
@@ -37,7 +40,8 @@ class Config:
             try:
                 with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                     self._data = json.load(f)
-            except (json.JSONDecodeError, OSError):
+            except (json.JSONDecodeError, OSError) as e:
+                log.warning("설정 파일 로드 실패 — 기본값 사용: %s", e)
                 self._data = {}
         # 누락 키 채우기
         for k, v in DEFAULTS.items():
@@ -48,8 +52,8 @@ class Config:
             CONFIG_DIR.mkdir(parents=True, exist_ok=True)
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:
                 json.dump(self._data, f, indent=2, ensure_ascii=False)
-        except OSError:
-            pass
+        except OSError as e:
+            log.warning("설정 파일 저장 실패: %s", e)
 
     def get(self, key: str):
         return self._data.get(key, DEFAULTS.get(key))

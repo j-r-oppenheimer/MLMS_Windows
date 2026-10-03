@@ -77,8 +77,8 @@ class LmsSession(QObject):
             if CACHE_FILE.exists():
                 with open(CACHE_FILE, "r", encoding="utf-8") as f:
                     return json.load(f)
-        except (json.JSONDecodeError, OSError):
-            pass
+        except (json.JSONDecodeError, OSError) as e:
+            log.warning("디스크 캐시 로드 실패: %s", e)
         return []
 
     @staticmethod
@@ -87,13 +87,14 @@ class LmsSession(QObject):
             CACHE_DIR.mkdir(parents=True, exist_ok=True)
             with open(CACHE_FILE, "w", encoding="utf-8") as f:
                 json.dump(events, f, ensure_ascii=False)
-        except OSError:
-            pass
+        except OSError as e:
+            log.warning("디스크 캐시 저장 실패: %s", e)
 
     # ── 로그인 ──────────────────────────────────────
 
     def login(self, username: str, password: str):
         """로그인 시작."""
+        log.info("로그인 페이지 로드: %s", LOGIN_URL)
         self._username = username
         self._password = password
         self._injected = False
@@ -269,11 +270,13 @@ class LmsSession(QObject):
 
         if events and len(events) == 1 and "error" in events[0]:
             self._loading_events = False
+            log.warning("이벤트 추출 JS 오류: %s", events[0]["error"])
             self.events_failed.emit(events[0]["error"])
             return
 
         self._loading_events = False
         parsed = self._parse_events(events)
+        log.info("이벤트 추출 완료 — %d개 파싱", len(parsed))
         self._all_events = parsed
         self._save_disk_cache(parsed)
         self.events_loaded.emit(parsed)
