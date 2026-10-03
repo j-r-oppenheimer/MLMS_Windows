@@ -4,8 +4,9 @@ from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QProgressBar, QScrollArea, QWidget, QFrame,
 )
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QFont, QCursor
+from PyQt6.QtWidgets import QAbstractButton
+from PyQt6.QtCore import Qt, pyqtSignal, QRectF
+from PyQt6.QtGui import QFont, QFontMetrics, QCursor, QPainter, QColor, QBrush, QPen
 
 
 class FileButton(QPushButton):
@@ -33,11 +34,58 @@ class FileButton(QPushButton):
         self.clicked.connect(lambda: self.download_requested.emit(self.file_info))
 
 
+class ColorSwatch(QAbstractButton):
+    """작은 원형 색 스와치 — 누르면 반대 색으로 바뀐다."""
+
+    DIAMETER = 14
+
+    def __init__(self, off_color: QColor | None, on_color: QColor, parent=None):
+        """off_color가 None이면 꺼진 상태를 테두리만 있는 빈 원으로 그린다."""
+        super().__init__(parent)
+        self._off = QColor(off_color) if off_color else None
+        self._on = QColor(on_color)
+        self._hover = False
+        self.setCheckable(True)
+        self.setFixedSize(self.DIAMETER, self.DIAMETER)
+        self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.setToolTip("이 수업 칸 색 반전")
+
+    def enterEvent(self, event):
+        self._hover = True
+        self.update()
+
+    def leaveEvent(self, event):
+        self._hover = False
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        inset = 1.0
+        rect = QRectF(inset, inset,
+                      self.width() - 2 * inset, self.height() - 2 * inset)
+        fill = self._on if self.isChecked() else self._off
+        if fill is None:   # 빈 원 — 테두리를 조금 더 진하게
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            ring = QColor(0, 0, 0, 190 if self._hover else 120)
+            width = 1.6 if self._hover else 1.2
+        else:
+            p.setBrush(QBrush(fill))
+            ring = QColor(0, 0, 0, 150 if self._hover else 60)
+            width = 1.4 if self._hover else 1.0
+        p.setPen(QPen(ring, width))
+        p.drawEllipse(rect)
+        p.end()
+
+
 class ClassDetailDialog(QDialog):
     """수업 상세 정보 팝업."""
     file_download_requested = pyqtSignal(dict)  # file_info dict
+    color_inverted_changed = pyqtSignal(bool)   # 우상단 색 반전 토글
 
-    def __init__(self, class_info: dict, parent=None):
+    def __init__(self, class_info: dict, inverted: bool = False,
+                 off_color: QColor | None = None,
+                 on_color: QColor | None = None, parent=None):
         super().__init__(parent)
         self.class_info = class_info
         self.setWindowTitle("수업 상세")
@@ -46,12 +94,32 @@ class ClassDetailDialog(QDialog):
 
         layout = QVBoxLayout(self)
 
-        # 과목명 (항상 표시)
+        # 과목명 (항상 표시) + 우상단 색 반전 토글
         title = class_info.get("title", "")
         title_label = QLabel(title)
         title_label.setFont(QFont("맑은 고딕", 14, QFont.Weight.Bold))
         title_label.setWordWrap(True)
-        layout.addWidget(title_label)
+
+        self.color_toggle = ColorSwatch(
+            off_color, QColor(on_color) if on_color else QColor("#4A90D9"))
+        self.color_toggle.setChecked(inverted)
+        self.color_toggle.setToolTip(
+            "이 수업 칸 색 반전" if off_color else "이 수업 칸 표시")
+        self.color_toggle.toggled.connect(self.color_inverted_changed.emit)
+
+        # 제목 첫 줄 중앙에 원이 오도록 위쪽 여백을 준다 (제목은 여러 줄일 수 있음)
+        swatch_col = QVBoxLayout()
+        swatch_col.setContentsMargins(0, 0, 0, 0)
+        swatch_col.setSpacing(0)
+        line_h = QFontMetrics(title_label.font()).height()
+        swatch_col.addSpacing(max((line_h - ColorSwatch.DIAMETER) // 2, 0))
+        swatch_col.addWidget(self.color_toggle)
+        swatch_col.addStretch(1)
+
+        header = QHBoxLayout()
+        header.addWidget(title_label, 1)
+        header.addLayout(swatch_col, 0)
+        layout.addLayout(header)
 
         # 구분선
         line = QFrame()

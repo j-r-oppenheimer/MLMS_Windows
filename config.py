@@ -27,6 +27,8 @@ DEFAULTS = {
     "refresh_interval": 30,   # 분 단위
     "font_family": "맑은 고딕",
     "auto_start": False,      # Windows 시작 시 자동 실행
+    "lock_position": False,   # 위젯 위치·크기 잠금
+    "inverted_blocks": [],    # 보색으로 표시할 수업 칸 키 목록
 }
 
 

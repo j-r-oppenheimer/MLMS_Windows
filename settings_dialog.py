@@ -121,6 +121,11 @@ class SettingsDialog(QDialog):
         self.auto_start.setChecked(config["auto_start"])
         layout.addWidget(self.auto_start)
 
+        # 위치 잠금
+        self.lock_position = QCheckBox("위치 잠금 (이동·크기 조절 방지)")
+        self.lock_position.setChecked(config["lock_position"])
+        layout.addWidget(self.lock_position)
+
         # 버튼
         btn_layout = QHBoxLayout()
         ok_btn = QPushButton("저장")
@@ -155,6 +160,8 @@ class SettingsDialog(QDialog):
         checked = self.class_btn_group.checkedButton()
         if checked:
             self.config["class_filter"] = checked.property("filter_val")
+
+        self.config["lock_position"] = self.lock_position.isChecked()
 
         # 자동 시작 설정
         auto_start = self.auto_start.isChecked()

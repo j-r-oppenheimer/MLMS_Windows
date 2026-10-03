@@ -12,6 +12,7 @@ from PyQt6.QtGui import (
 )
 
 from config import Config
+from variant import INVERT_BLOCK_COLOR
 
 DAY_LABELS = ["월", "화", "수", "목", "금"]
 EXAM_KEYWORDS = ["시험", "중간", "기말", "평가"]
@@ -49,8 +50,39 @@ def ceil_to_30min(hour: int, minute: int) -> int:
         return (hour + 1) * 60
 
 
+def class_key(title: str, date: str, start_hour: int, start_min: int) -> str:
+    """수업 칸 하나를 가리키는 키 — 같은 과목이라도 날짜·시각이 다르면 별개."""
+    return f"{date}|{start_hour:02d}:{start_min:02d}|{title}"
+
+
 def is_exam(title: str) -> bool:
     return any(kw in title for kw in EXAM_KEYWORDS)
+
+
+# 색상 휠(RYB) ↔ RGB 색상각 대응표 — 미술 색상환 기준 보색을 얻기 위한 것.
+# 노랑(RGB 60°)의 반대가 보라, 파랑 계열의 반대가 빨강 계열이 되도록 한다.
+_RGB_HUES = [0.0, 20.0, 60.0, 120.0, 240.0, 300.0, 360.0]
+_RYB_HUES = [0.0, 60.0, 120.0, 180.0, 240.0, 300.0, 360.0]
+
+
+def _lerp_hue(v: float, xs: list[float], ys: list[float]) -> float:
+    for i in range(len(xs) - 1):
+        if xs[i] <= v <= xs[i + 1]:
+            span = xs[i + 1] - xs[i]
+            t = (v - xs[i]) / span if span else 0.0
+            return ys[i] + (ys[i + 1] - ys[i]) * t
+    return ys[-1]
+
+
+def complement_color(base: QColor) -> QColor:
+    """색상 휠 반대편 색 — 노랑↔보라, 파랑 계열↔빨강 계열."""
+    h, s, v, a = base.getHsv()
+    if h < 0:  # 무채색 — 돌릴 색상이 없다
+        return QColor(base)
+    ryb = (_lerp_hue(float(h), _RGB_HUES, _RYB_HUES) + 180.0) % 360.0
+    out = QColor()
+    out.setHsv(int(round(_lerp_hue(ryb, _RYB_HUES, _RGB_HUES))) % 360, s, v, a)
+    return out
 
 
 def exam_color(base: QColor, dark: bool) -> QColor:
@@ -216,6 +248,30 @@ class TimetableDesktopWidget(QWidget):
             ))
         self.update()
 
+    @staticmethod
+    def _raw_key(class_info: dict) -> str:
+        return class_key(
+            class_info.get("title", ""), class_info.get("date", ""),
+            class_info.get("start_hour", 0), class_info.get("start_min", 0),
+        )
+
+    def is_class_inverted(self, class_info: dict) -> bool:
+        return self._raw_key(class_info) in (self.config["inverted_blocks"] or [])
+
+    def set_class_inverted(self, class_info: dict, inverted: bool):
+        """수업 칸 하나의 색 반전 — 설정에 저장하고 즉시 다시 그린다."""
+        key = self._raw_key(class_info)
+        keys = list(self.config["inverted_blocks"] or [])
+        if inverted and key not in keys:
+            keys.append(key)
+        elif not inverted and key in keys:
+            keys.remove(key)
+        else:
+            return
+        self.config["inverted_blocks"] = keys
+        self.config.save()
+        self.update()
+
     def _find_raw_class(self, cls: ClassItem) -> dict | None:
         """ClassItem에 대응하는 원본 dict를 찾는다."""
         for raw in self._raw_classes:
@@ -361,6 +417,8 @@ class TimetableDesktopWidget(QWidget):
         self._loaded = True
         self._layout_map = build_layout_map(self.classes, time_col_w, col_w, header_h, hour_h)
 
+        inverted_keys = set(self.config["inverted_blocks"] or [])
+
         title_font = self._font(int(text_xs), bold=True)
         prof_font = self._font(int(text_xs * 0.88))
         title_fm = QFontMetricsF(title_font)
@@ -373,10 +431,14 @@ class TimetableDesktopWidget(QWidget):
             if not layout:
                 continue
 
+            cls_key = class_key(cls.title, cls.date, cls.start_hour, cls.start_min)
+            marked = cls_key in inverted_keys
+            base_color = (complement_color(block_color)
+                          if marked and INVERT_BLOCK_COLOR else block_color)
             if exam_hl and is_exam(cls.title):
-                bc = exam_color(block_color, dark)
+                bc = exam_color(base_color, dark)
             else:
-                bc = QColor(block_color)
+                bc = QColor(base_color)
             bc.setAlpha(block_alpha)
 
             rect = QRectF(layout.x, layout.y, layout.w, layout.h)
@@ -459,6 +521,11 @@ class TimetableDesktopWidget(QWidget):
                     return
 
             self._click_start_pos = pos
+
+            # 위치 잠금 — 이동·크기조절은 막되, 수업 클릭은 계속 동작
+            if self.config["lock_position"]:
+                return
+
             edge = self._edge_at(pos)
             if edge:
                 self._resizing = True

@@ -17,7 +17,8 @@ from config import Config
 
 log = logging.getLogger("mlms.app")
 from lms_session import LmsSession
-from timetable_widget import TimetableDesktopWidget
+from timetable_widget import TimetableDesktopWidget, complement_color
+from variant import INVERT_BLOCK_COLOR
 from login_dialog import LoginDialog
 from settings_dialog import SettingsDialog
 from class_detail_dialog import ClassDetailDialog
@@ -80,6 +81,12 @@ class MLMSApp:
         self.action_this_week = QAction("이번 주로 이동")
         self.action_this_week.triggered.connect(self.widget.go_this_week)
         menu.addAction(self.action_this_week)
+
+        self.action_lock = QAction("위치 잠금")
+        self.action_lock.setCheckable(True)
+        self.action_lock.setChecked(self.config["lock_position"])
+        self.action_lock.toggled.connect(self._toggle_lock)
+        menu.addAction(self.action_lock)
 
         menu.addSeparator()
 
@@ -215,6 +222,22 @@ class MLMSApp:
     def _on_class_clicked(self, class_info: dict):
         """수업 블록 클릭 → 상세 다이얼로그."""
         log.info("수업 클릭: %s", class_info.get("title", ""))
+        base_color = QColor(self.config["block_color"])
+        if INVERT_BLOCK_COLOR:
+            # 꺼짐: 테마색 원 / 켜짐: 보색 원
+            off_color, on_color = base_color, complement_color(base_color)
+        else:
+            # 꺼짐: 빈 원 / 켜짐: 테마색 원
+            off_color, on_color = None, base_color
+        dlg = ClassDetailDialog(
+            class_info,
+            inverted=self.widget.is_class_inverted(class_info),
+            off_color=off_color,
+            on_color=on_color,
+        )
+        dlg.color_inverted_changed.connect(
+            lambda on, ci=class_info: self.widget.set_class_inverted(ci, on)
+        )
         self._detail_dialog = dlg
 
         lp_seq = class_info.get("lp_seq")
@@ -299,10 +322,21 @@ class MLMSApp:
 
     # ── 설정 ────────────────────────────────────
 
+    def _toggle_lock(self, checked: bool):
+        """트레이 메뉴에서 위치 잠금 토글."""
+        self.config["lock_position"] = checked
+        self.config.save()
+        log.info("위치 잠금 %s", "켜짐" if checked else "꺼짐")
+
     def _show_settings(self):
         dlg = SettingsDialog(self.config)
         if dlg.exec() == SettingsDialog.DialogCode.Accepted:
             self.widget.update()
+            # 설정 다이얼로그에서 잠금이 바뀌었을 수 있으니 트레이 체크 상태 동기화
+            # (setChecked가 toggled를 재발생시켜 중복 저장되지 않도록 시그널 차단)
+            self.action_lock.blockSignals(True)
+            self.action_lock.setChecked(self.config["lock_position"])
+            self.action_lock.blockSignals(False)
             # 갱신 간격 업데이트
             interval_ms = self.config["refresh_interval"] * 60 * 1000
             self.refresh_timer.start(interval_ms)
