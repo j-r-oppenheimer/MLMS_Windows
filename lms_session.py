@@ -120,27 +120,19 @@ class LmsSession(QObject):
             self.login_failed.emit("로그인 페이지 로드 실패 (네트워크 연결을 확인해주세요)")
             return
 
+        # 로그인 페이지 최초 로드 시에만 자격증명 주입을 예약한다.
+        # 성공/실패 판정은 주입 후 _poll_login_result 폴링이 전담한다.
         if "/login" in url and not self._injected:
             self._injected = True
             QTimer.singleShot(800, self._inject_credentials)
             return
 
-        # 자격증명 주입 후 다시 로그인 페이지로 돌아온 경우 (잘못된 비밀번호 등)
-        if "/login" in url and self._injected:
-            if self._login_timer and self._login_timer.isActive():
-                self._login_timer.stop()
-            self.login_failed.emit("로그인 실패 (아이디 또는 비밀번호를 확인해주세요)")
-            return
-
-        if "/login" not in url and self._injected:
-            if self._login_timer and self._login_timer.isActive():
-                self._login_timer.stop()
-            self.login_success.emit()
-            return
-
     def _inject_credentials(self, retry_count=0):
         safe_id = self._username.replace("\\", "\\\\").replace("'", "\\'")
         safe_pw = self._password.replace("\\", "\\\\").replace("'", "\\'")
+        # 이 로그인 페이지는 폼 제출이 아니라 AJAX(POST /ajax/login) 방식이다.
+        # 버튼 클릭 후 페이지 이동을 기다리는 대신, 직접 요청을 보내고 JSON
+        # 응답의 status를 폴링으로 읽어 성공/실패를 확정한다. (alert() 블로킹 회피)
         js = f"""
         (function() {{
             var idEl = document.querySelector('input[name="id"]')
@@ -150,31 +142,84 @@ class LmsSession(QObject):
                     || document.querySelector('input[name="password"]')
                     || document.querySelector('input[type="password"]');
             if (!idEl || !pwEl) return 'fields_not_found';
-            idEl.value = '{safe_id}';
-            pwEl.value = '{safe_pw}';
-            ['input','change'].forEach(function(ev) {{
-                idEl.dispatchEvent(new Event(ev, {{bubbles:true}}));
-                pwEl.dispatchEvent(new Event(ev, {{bubbles:true}}));
-            }});
-            var btn = document.querySelector('button[type="submit"]')
-                   || document.querySelector('input[type="submit"]')
-                   || document.querySelector('button.btn-login')
-                   || document.querySelector('a.btn-login')
-                   || document.querySelector('button');
-            if (btn) {{ btn.click(); return 'clicked'; }}
-            var form = document.querySelector('form');
-            if (form) {{ form.submit(); return 'form_submitted'; }}
-            return 'no_submit_element';
+            var ID = '{safe_id}';
+            var PW = '{safe_pw}';
+            idEl.value = ID;
+            pwEl.value = PW;
+            window.__lms_login = 'pending';
+            fetch('/ajax/login', {{
+                method: 'POST',
+                headers: {{'Content-Type': 'application/x-www-form-urlencoded'}},
+                body: 'id=' + encodeURIComponent(ID) + '&pwd=' + encodeURIComponent(PW),
+                credentials: 'same-origin'
+            }}).then(function(r) {{ return r.text(); }})
+              .then(function(t) {{ window.__lms_login = 'ok:' + t; }})
+              .catch(function(e) {{ window.__lms_login = 'neterr:' + e; }});
+            return 'submitted';
         }})();
         """
         self._inject_retry = retry_count
         self._page.runJavaScript(js, 0, self._on_inject_result)
 
     def _on_inject_result(self, result):
-        """자격증명 주입 결과 확인 — 필드를 못 찾으면 재시도."""
-        if result == "fields_not_found" and self._inject_retry < 5:
-            QTimer.singleShot(800, lambda: self._inject_credentials(self._inject_retry + 1))
+        """자격증명 주입 결과 확인 — 필드를 못 찾으면 재시도, 요청 성공 시 폴링 시작."""
+        if result == "fields_not_found":
+            if self._inject_retry < 5:
+                QTimer.singleShot(800, lambda: self._inject_credentials(self._inject_retry + 1))
+            else:
+                if self._login_timer and self._login_timer.isActive():
+                    self._login_timer.stop()
+                self.login_failed.emit("로그인 폼을 찾지 못했습니다 (페이지 구조 변경 가능성)")
             return
+        if result == "submitted":
+            self._login_poll = 0
+            QTimer.singleShot(300, self._poll_login_result)
+
+    def _poll_login_result(self):
+        """AJAX 로그인 응답(window.__lms_login)을 폴링한다."""
+        self._page.runJavaScript("window.__lms_login || 'pending'", 0, self._on_login_result)
+
+    def _on_login_result(self, result):
+        result = result or "pending"
+
+        if result == "pending":
+            self._login_poll = getattr(self, "_login_poll", 0) + 1
+            if self._login_poll < 40:  # 최대 ~12초 대기
+                QTimer.singleShot(300, self._poll_login_result)
+            else:
+                if self._login_timer and self._login_timer.isActive():
+                    self._login_timer.stop()
+                self.login_failed.emit("로그인 응답 시간 초과 (네트워크를 확인해주세요)")
+            return
+
+        # 응답 도착 — 로그인 타이머 종료
+        if self._login_timer and self._login_timer.isActive():
+            self._login_timer.stop()
+
+        if result.startswith("neterr:"):
+            log.warning("로그인 요청 네트워크 오류: %s", result[7:])
+            self.login_failed.emit("로그인 요청 실패 (네트워크 연결을 확인해주세요)")
+            return
+
+        body = result[3:] if result.startswith("ok:") else result
+        try:
+            data = json.loads(body)
+            status = str(data.get("status", ""))
+        except (json.JSONDecodeError, TypeError):
+            status = None
+
+        if status == "200":
+            log.info("로그인 성공: %s", self._username)
+            self.login_success.emit()
+        elif status == "102":
+            log.warning("로그인 실패 status=102 (계정 상태)")
+            self.login_failed.emit("로그인 실패 (계정 상태를 확인해주세요)")
+        elif status is not None:
+            log.warning("로그인 실패 status=%s", status)
+            self.login_failed.emit("로그인 실패 (아이디 또는 비밀번호를 확인해주세요)")
+        else:
+            log.warning("로그인 응답 파싱 실패: %.200s", body)
+            self.login_failed.emit("로그인 실패 (서버가 예상치 못한 응답을 반환했습니다)")
 
     # ── 시간표 로드 ─────────────────────────────────
 
