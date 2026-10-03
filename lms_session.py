@@ -1,6 +1,7 @@
 """LMS 세션 관리 — QWebEngineView 기반 로그인 + 시간표 로드 + 수업 상세 + 파일 다운로드."""
 
 import json
+import logging
 import re
 import os
 from urllib.parse import quote
@@ -10,10 +11,13 @@ from datetime import datetime, timedelta
 CACHE_DIR = Path.home() / ".mlms_windows"
 CACHE_FILE = CACHE_DIR / "events_cache.json"
 
+log = logging.getLogger("mlms.session")
+
 from PyQt6.QtCore import QObject, QUrl, QTimer, pyqtSignal
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import (
     QWebEnginePage, QWebEngineProfile, QWebEngineDownloadRequest,
+    QWebEngineLoadingInfo,
 )
 from PyQt6.QtNetwork import QNetworkCookie
 
@@ -48,11 +52,11 @@ class LmsSession(QObject):
         self._view.hide()
 
         # 별도 WebView — 수업 상세 로드용
-        self._detail_page = QWebEnginePage(self._profile, self)
-        self._detail_view = QWebEngineView()
-        self._detail_view.setPage(self._detail_page)
-        self._detail_view.resize(1, 1)
-        self._detail_view.hide()
+        self._detail_page = None
+        self._detail_view = None
+        self._create_detail_page()
+        self._detail_url = ""
+        self._detail_retried = False
 
         self._injected = False
         self._login_timer = None
@@ -335,20 +339,52 @@ class LmsSession(QObject):
 
     # ── 수업 상세 로드 ──────────────────────────────
 
+    def _create_detail_page(self):
+        """상세 로드용 숨김 페이지를 (재)생성한다."""
+        if self._detail_view is not None:
+            self._detail_view.close()
+            self._detail_view.deleteLater()
+        if self._detail_page is not None:
+            self._detail_page.deleteLater()
+        self._detail_page = QWebEnginePage(self._profile, self)
+        self._detail_page.loadingChanged.connect(self._on_detail_loading_changed)
+        self._detail_view = QWebEngineView()
+        self._detail_view.setPage(self._detail_page)
+        self._detail_view.resize(1, 1)
+        self._detail_view.hide()
+
+    def _on_detail_loading_changed(self, info):
+        if info.status() == QWebEngineLoadingInfo.LoadStatus.LoadFailedStatus:
+            log.warning("상세 페이지 로드 오류: %s (domain=%s, code=%s) %s",
+                        info.errorString(), info.errorDomain(), info.errorCode(),
+                        info.url().toString())
+
     def load_lesson_detail(self, lp_seq: str, curr_seq: str, aca_seq: str):
         """수업 상세 페이지를 로드하고 과목명, 강의실, 파일 목록을 추출한다."""
-        url = f"{SCHEDULE_SHOW_URL}?lp_seq={lp_seq}&curr_seq={curr_seq}&aca_seq={aca_seq}"
+        self._detail_url = f"{SCHEDULE_SHOW_URL}?lp_seq={lp_seq}&curr_seq={curr_seq}&aca_seq={aca_seq}"
+        self._detail_retried = False
+        self._start_detail_load()
+
+    def _start_detail_load(self):
         # 기존 연결 제거 후 새로 연결 (중복 연결 방지)
         try:
             self._detail_page.loadFinished.disconnect(self._on_detail_page_loaded)
         except TypeError:
             pass
         self._detail_page.loadFinished.connect(self._on_detail_page_loaded)
-        self._detail_page.load(QUrl(url))
+        self._detail_page.load(QUrl(self._detail_url))
 
     def _on_detail_page_loaded(self, ok: bool):
         self._detail_page.loadFinished.disconnect(self._on_detail_page_loaded)
         if not ok:
+            # 장시간 실행·슬립 복귀 후 숨김 페이지가 망가진 채 남는 경우가 있어
+            # 페이지를 새로 만들어 한 번 재시도한다.
+            if not self._detail_retried:
+                self._detail_retried = True
+                log.info("상세 페이지 재생성 후 재시도")
+                self._create_detail_page()
+                self._start_detail_load()
+                return
             self.detail_failed.emit("상세 페이지 로드 실패")
             return
 
