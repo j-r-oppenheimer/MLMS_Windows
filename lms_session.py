@@ -17,7 +17,7 @@ from PyQt6.QtCore import QObject, QUrl, QTimer, pyqtSignal
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import (
     QWebEnginePage, QWebEngineProfile, QWebEngineDownloadRequest,
-    QWebEngineLoadingInfo,
+    QWebEngineLoadingInfo, QWebEngineScript,
 )
 from PyQt6.QtNetwork import QNetworkCookie
 
@@ -27,6 +27,11 @@ TIMETABLE_URL = f"{BASE_URL}/aca/MYscheduleMST"
 SCHEDULE_SHOW_URL = f"{BASE_URL}/st/lesson/scheduleShow"
 FILE_DOWNLOAD_URL = f"{BASE_URL}/file/download"
 READ_RECEIPT_URL = f"{BASE_URL}/ajax/st/lesson/lessonData/read"
+
+# 달력이 채워지길 기다리는 폴링 — 300ms x 33회 ≈ 10초
+EVENT_POLL_INTERVAL_MS = 300
+EVENT_POLL_MAX = 33
+EVENTS_EMPTY_MSG = "이벤트 0개"
 
 
 class LmsSession(QObject):
@@ -60,6 +65,10 @@ class LmsSession(QObject):
 
         self._injected = False
         self._login_timer = None
+        # 로그인 시도 번호 — 시간 초과·재시도로 버려진 시도의 늦은 응답을 무시한다.
+        self._login_seq = 0
+        self._active_seq = 0
+        self._seq_script: QWebEngineScript | None = None
         self._poll_count = 0
         self._pending_download = None
         self._active_download = None
@@ -99,20 +108,66 @@ class LmsSession(QObject):
         self._password = password
         self._injected = False
 
+        self._login_seq += 1
+        seq = self._login_seq
+
         # 이전 타이머 정리
         if self._login_timer and self._login_timer.isActive():
             self._login_timer.stop()
+
+        # 새 문서마다 시도 번호를 심어, 이전 페이지가 아닌 이번 로드의 문서인지 가린다.
+        scripts = self._page.scripts()
+        if self._seq_script is not None:
+            scripts.remove(self._seq_script)
+        self._seq_script = QWebEngineScript()
+        self._seq_script.setName("mlms_login_seq")
+        self._seq_script.setSourceCode(f"window.__mlms_seq = {seq};")
+        self._seq_script.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentCreation)
+        self._seq_script.setWorldId(QWebEngineScript.ScriptWorldId.MainWorld)
+        self._seq_script.setRunsOnSubFrames(False)
+        scripts.insert(self._seq_script)
 
         self._page.load(QUrl(LOGIN_URL))
 
         self._login_timer = QTimer(self)
         self._login_timer.setSingleShot(True)
-        self._login_timer.timeout.connect(lambda: self.login_failed.emit("로그인 시간 초과"))
+        self._login_timer.timeout.connect(lambda s=seq: self._on_login_timeout(s))
         self._login_timer.start(60_000)
 
-    def _on_load_finished(self, ok: bool):
-        url = self._page.url().toString()
+        # loadFinished는 느린 외부 리소스까지 기다려 1분 넘게 걸리기도 한다.
+        # 폼이 그려지는 대로(DOMContentLoaded) 바로 주입하도록 따로 폴링한다.
+        QTimer.singleShot(300, lambda s=seq: self._wait_login_form(s))
 
+    def _on_login_timeout(self, seq: int):
+        if seq != self._login_seq:
+            return
+        self._login_seq += 1  # 이후 도착하는 응답은 버린다
+        log.warning("로그인 시간 초과 — URL=%s 주입=%s", self._page.url().toString(), self._injected)
+        self.login_failed.emit("로그인 시간 초과")
+
+    def _wait_login_form(self, seq: int):
+        if seq != self._login_seq or self._injected:
+            return
+        js = f"""
+        (function() {{
+            if (window.__mlms_seq !== {seq} || document.readyState === 'loading') return 'wait';
+            return document.querySelector('input[type="password"]') ? 'ready' : 'wait';
+        }})()
+        """
+        self._page.runJavaScript(js, 0, lambda r, s=seq: self._on_form_check(s, r))
+
+    def _on_form_check(self, seq: int, result):
+        if seq != self._login_seq or self._injected:
+            return
+        if result == "ready":
+            log.info("로그인 폼 준비됨 — 자격증명 주입")
+            self._injected = True
+            self._active_seq = seq
+            self._inject_credentials()
+        else:
+            QTimer.singleShot(300, lambda s=seq: self._wait_login_form(s))
+
+    def _on_load_finished(self, ok: bool):
         # 페이지 로드 자체가 실패한 경우 (네트워크 오류 등)
         if not ok and not self._injected:
             if self._login_timer and self._login_timer.isActive():
@@ -120,12 +175,8 @@ class LmsSession(QObject):
             self.login_failed.emit("로그인 페이지 로드 실패 (네트워크 연결을 확인해주세요)")
             return
 
-        # 로그인 페이지 최초 로드 시에만 자격증명 주입을 예약한다.
-        # 성공/실패 판정은 주입 후 _poll_login_result 폴링이 전담한다.
-        if "/login" in url and not self._injected:
-            self._injected = True
-            QTimer.singleShot(800, self._inject_credentials)
-            return
+        # 자격증명 주입은 _wait_login_form 폴링이, 성공/실패 판정은
+        # 주입 후 _poll_login_result 폴링이 전담한다.
 
     def _inject_credentials(self, retry_count=0):
         safe_id = self._username.replace("\\", "\\\\").replace("'", "\\'")
@@ -180,6 +231,8 @@ class LmsSession(QObject):
         self._page.runJavaScript("window.__lms_login || 'pending'", 0, self._on_login_result)
 
     def _on_login_result(self, result):
+        if self._active_seq != self._login_seq:
+            return  # 시간 초과나 재시도로 버려진 시도
         result = result or "pending"
 
         if result == "pending":
@@ -308,9 +361,9 @@ class LmsSession(QObject):
         except (json.JSONDecodeError, TypeError):
             events = []
 
-        if not events and self._poll_count < 10:
+        if not events and self._poll_count < EVENT_POLL_MAX:
             self._poll_count += 1
-            QTimer.singleShot(300, self._poll_all_events)
+            QTimer.singleShot(EVENT_POLL_INTERVAL_MS, self._poll_all_events)
             return
 
         if events and len(events) == 1 and "error" in events[0]:
@@ -322,6 +375,15 @@ class LmsSession(QObject):
         self._loading_events = False
         parsed = self._parse_events(events)
         log.info("이벤트 추출 완료 — %d개 파싱", len(parsed))
+        # 0개는 서버 지연·세션 문제로 달력이 비어 있는 경우가 대부분이다.
+        # 정상 결과로 받아들이면 기존 캐시까지 지워지므로 실패로 처리한다.
+        if not parsed:
+            url = self._page.url().toString()
+            if "/login" in url:
+                self.events_failed.emit("세션 만료")
+            else:
+                self.events_failed.emit(EVENTS_EMPTY_MSG)
+            return
         self._all_events = parsed
         self._save_disk_cache(parsed)
         self.events_loaded.emit(parsed)
