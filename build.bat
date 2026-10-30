@@ -13,7 +13,10 @@ if errorlevel 1 (
 echo.
 echo [2/2] Building MLMS.exe...
 python -m PyInstaller --onefile --windowed --name MLMS ^
+    --icon mlms.ico ^
     --add-data "*.py;." ^
+    --add-data "mlms.ico;." ^
+    --add-data "mlms_tray.ico;." ^
     --hidden-import PyQt6.QtWebEngineWidgets ^
     --hidden-import PyQt6.QtWebEngineCore ^
     --hidden-import keyring.backends.Windows ^

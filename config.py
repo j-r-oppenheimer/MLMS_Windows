@@ -10,12 +10,15 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 
 log = logging.getLogger("mlms.config")
 
+# 기본 블록색을 바꾸기 전 값 — 그때 깔았던 사람은 색이 바뀌지 않게 이 값을 유지한다.
+LEGACY_BLOCK_COLOR = "#4A90D9"
+
 DEFAULTS = {
     "bg_alpha": 200,          # 배경 투명도 (0~255)
     "block_alpha": 220,       # 블록 투명도 (0~255)
     "text_size": 100,         # 텍스트 크기 % (50~150)
     "dark_mode": False,
-    "block_color": "#4A90D9", # 블록 기본 색상
+    "block_color": "#8D9DB6", # 블록 기본 색상 — 안드로이드 MLMS 앱 기본 블록색
     "class_filter": "all",    # "all" | "A" | "B"
     "exam_highlight": True,
     "widget_x": 100,
@@ -45,6 +48,8 @@ class Config:
             except (json.JSONDecodeError, OSError) as e:
                 log.warning("설정 파일 로드 실패 — 기본값 사용: %s", e)
                 self._data = {}
+            # 이미 설치해 쓰던 사람은 저장된 색이 없어도 예전 기본색을 그대로 쓴다.
+            self._data.setdefault("block_color", LEGACY_BLOCK_COLOR)
         # 누락 키 채우기
         for k, v in DEFAULTS.items():
             self._data.setdefault(k, v)
