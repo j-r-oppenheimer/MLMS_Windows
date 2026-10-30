@@ -11,6 +11,7 @@
 ## 기능
 
 - 바탕화면 시간표 위젯 (주별 탐색, A/B반 필터)
+- 시험 일정 하이라이트
 - 수업 블록 클릭 시 상세 정보 (과목, 교수, 시간, 강의실)
 - 수업 자료 다운로드
 - 자동 로그인
@@ -24,12 +25,10 @@
 ## 빌드
 
 ```bash
-pip install -r requirements.txt
-pip install pyinstaller
-pyinstaller MLMS.spec
+build.bat
 ```
 
-`dist/MLMS.exe`가 생성됩니다.
+의존성 설치와 PyInstaller 빌드를 한 번에 하며, `dist/MLMS.exe`가 생성됩니다. 앱 아이콘(`mlms.ico`, `mlms_tray.ico`)이 같은 폴더에 있어야 합니다.
 
 ## 사용 기술
 
