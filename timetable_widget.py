@@ -1,5 +1,7 @@
 """데스크톱 시간표 위젯 — QPainter로 시간표 렌더링."""
 
+import os
+import sys
 from datetime import datetime, timedelta, date
 from dataclasses import dataclass
 from typing import Optional
@@ -15,7 +17,7 @@ from config import Config
 from variant import INVERT_BLOCK_COLOR
 
 DAY_LABELS = ["월", "화", "수", "목", "금"]
-EXAM_KEYWORDS = ["시험", "중간", "기말", "평가"]
+EXAM_KEYWORDS = ["시험", "중간", "기말", "평가", "MCQ", "MEQ", "CPX"]
 # 키워드를 포함하지만 시험이 아닌 단어 — 매칭 전에 제거한다.
 EXAM_EXCLUDE_WORDS = ["시험관"]
 START_HOUR = 9
@@ -52,15 +54,31 @@ def ceil_to_30min(hour: int, minute: int) -> int:
         return (hour + 1) * 60
 
 
+def asset_path(name: str) -> str:
+    """exe로 묶였을 땐 임시 추출 폴더, 아니면 소스 폴더에서 찾는다."""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, name)
+
+
 def class_key(title: str, date: str, start_hour: int, start_min: int) -> str:
     """수업 칸 하나를 가리키는 키 — 같은 과목이라도 날짜·시각이 다르면 별개."""
     return f"{date}|{start_hour:02d}:{start_min:02d}|{title}"
+
+
+def out_of_range_label(cls: ClassItem) -> str:
+    """표시 범위(9~18시) 밖으로 잘린 시각 — "08:30~", "~19:30", "08:30~19:30"."""
+    start = cls.start_hour * 60 + cls.start_min
+    end = cls.end_hour * 60 + cls.end_min
+    head = f"{cls.start_hour:02d}:{cls.start_min:02d}" if start < START_HOUR * 60 else ""
+    tail = f"{cls.end_hour:02d}:{cls.end_min:02d}" if end > END_HOUR * 60 else ""
+    return f"{head}~{tail}" if head or tail else ""
 
 
 def is_exam(title: str) -> bool:
     cleaned = title
     for word in EXAM_EXCLUDE_WORDS:
         cleaned = cleaned.replace(word, "")
+    cleaned = cleaned.upper()
     return any(kw in cleaned for kw in EXAM_KEYWORDS)
 
 
@@ -123,7 +141,8 @@ def build_layout_map(
         for cls in day_classes:
             s = ceil_to_30min(cls.start_hour, cls.start_min) - START_HOUR * 60
             e = ceil_to_30min(cls.end_hour, cls.end_min) - START_HOUR * 60
-            if s >= 0 and e > s and s < TOTAL_HOURS * 60:
+            # 9시 전에 시작하거나 18시 후에 끝나는 수업도 범위 안 부분은 그린다.
+            if e > max(s, 0) and s < TOTAL_HOURS * 60:
                 valid.append(cls)
 
         sorted_cls = sorted(valid, key=lambda c: (c.start_hour * 60 + c.start_min, c.title))
@@ -163,7 +182,7 @@ def build_layout_map(
 
             s = ceil_to_30min(cls.start_hour, cls.start_min) - START_HOUR * 60
             e = ceil_to_30min(cls.end_hour, cls.end_min) - START_HOUR * 60
-            y1 = header_h + s / 60.0 * hour_h
+            y1 = header_h + max(s, 0) / 60.0 * hour_h
             y2 = header_h + min(e, TOTAL_HOURS * 60) / 60.0 * hour_h
             bh = max(y2 - y1 - 1.0, 0.0)
             if bh >= 3.0:
@@ -491,8 +510,9 @@ class TimetableDesktopWidget(QWidget):
             if text_w < 2:
                 continue
 
-            has_prof = bool(cls.professor)
-            prof_space = prof_line_h + 4 if has_prof else 0
+            # 교수 이름 아래에 범위 밖 시각을 덧붙인다.
+            sub_lines = [t for t in (cls.professor, out_of_range_label(cls)) if t]
+            prof_space = (prof_line_h * len(sub_lines) + 4) if sub_lines else 0
             title_max_h = max(layout.h - 2 * pad - prof_space, title_line_h)
 
             p.setFont(title_font)
@@ -520,14 +540,17 @@ class TimetableDesktopWidget(QWidget):
                 y_offset += title_line_h
             p.restore()
 
-            if has_prof:
+            if sub_lines:
                 prof_y = layout.y + pad + min(actual_title_h, title_max_h) + 4
-                if prof_y + prof_line_h < layout.y + layout.h:
-                    p.setFont(prof_font)
-                    prof_color = QColor(Qt.GlobalColor.white)
-                    prof_color.setAlpha(210)
-                    p.setPen(prof_color)
-                    p.drawText(QPointF(layout.x + pad, prof_y + prof_fm.ascent()), cls.professor)
+                p.setFont(prof_font)
+                prof_color = QColor(Qt.GlobalColor.white)
+                prof_color.setAlpha(210)
+                p.setPen(prof_color)
+                for text in sub_lines:
+                    if prof_y + prof_line_h >= layout.y + layout.h:
+                        break
+                    p.drawText(QPointF(layout.x + pad, prof_y + prof_fm.ascent()), text)
+                    prof_y += prof_line_h
 
         p.end()
 
