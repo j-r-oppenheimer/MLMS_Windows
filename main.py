@@ -16,20 +16,29 @@ from crash_handler import setup_logging, install_excepthook
 from config import Config
 
 log = logging.getLogger("mlms.app")
-from lms_session import LmsSession
-from timetable_widget import TimetableDesktopWidget, complement_color
+from lms_session import LmsSession, EVENTS_EMPTY_MSG
+from timetable_widget import TimetableDesktopWidget, complement_color, asset_path
 from variant import INVERT_BLOCK_COLOR
 from login_dialog import LoginDialog
 from settings_dialog import SettingsDialog
 from class_detail_dialog import ClassDetailDialog
 
 
-def create_default_icon() -> QIcon:
+# 작게 보이는 곳(트레이·팝업·작업표시줄)은 M만 쓴 아이콘을 쓴다.
+# exe용 mlms.ico는 32px 이하는 M, 48px 이상은 MLMS 글자가 들어 있다.
+APP_ICON_FILE = "mlms_tray.ico"
+
+
+def create_default_icon(file: str = APP_ICON_FILE) -> QIcon:
+    # 안드로이드 MLMS 앱과 같은 아이콘. 파일이 없을 때만 직접 그린다.
+    icon = QIcon(asset_path(file))
+    if not icon.isNull():
+        return icon
     pm = QPixmap(16, 16)
     pm.fill(QColor(0, 0, 0, 0))
     p = QPainter(pm)
-    p.setBrush(QColor("#4A90D9"))
-    p.setPen(QColor("#4A90D9"))
+    p.setBrush(QColor("#7787A1"))
+    p.setPen(QColor("#7787A1"))
     p.drawRoundedRect(1, 1, 14, 14, 3, 3)
     p.setPen(QColor(255, 255, 255))
     p.drawText(3, 13, "M")
@@ -41,6 +50,8 @@ class MLMSApp:
     def __init__(self):
         self.app = QApplication(sys.argv)
         self.app.setQuitOnLastWindowClosed(False)
+        self.app_icon = create_default_icon()
+        self.app.setWindowIcon(self.app_icon)
 
         self.config = Config()
         self.session = LmsSession()
@@ -49,7 +60,7 @@ class MLMSApp:
         self.widget.class_clicked.connect(self._on_class_clicked)
 
         # 시스템 트레이
-        self.tray = QSystemTrayIcon(create_default_icon(), self.app)
+        self.tray = QSystemTrayIcon(self.app_icon, self.app)
         self._build_tray_menu()
         self.tray.show()
 
@@ -102,6 +113,9 @@ class MLMSApp:
         self.action_logout.triggered.connect(self._logout)
         menu.addAction(self.action_logout)
 
+        # 로그인 상태에 따라 로그인/로그아웃 중 하나만 보인다.
+        menu.aboutToShow.connect(self._update_login_actions)
+
         menu.addSeparator()
 
         action_quit = QAction("종료")
@@ -110,11 +124,16 @@ class MLMSApp:
 
         self.tray.setContextMenu(menu)
 
+    def _update_login_actions(self):
+        logged_in = getattr(self, "_logged_in", False)
+        self.action_login.setVisible(not logged_in)
+        self.action_logout.setVisible(logged_in)
+
     def start(self):
-        # 디스크 캐시가 있으면 즉시 위젯에 표시
+        # 디스크 캐시가 있으면 즉시 위젯에 표시 (이번 주가 비어 있어도)
         week_start = self.widget.current_week_start()
         cached = self.session.get_cached_week(week_start)
-        if cached:
+        if cached is not None:
             log.info("디스크 캐시에서 %d개 수업 표시", len(cached))
             self.widget.set_classes(cached)
             self.widget.show()
@@ -169,6 +188,8 @@ class MLMSApp:
     def _on_login_failed(self, msg: str):
         log.warning("로그인 실패: %s", msg)
         self.tray.setToolTip("MLMS — 로그인 실패")
+        # 로그인에 실패해도 마지막으로 받아둔 시간표는 계속 보여준다.
+        self._show_cached_week()
         QMessageBox.warning(None, "MLMS 로그인 실패", msg)
         self._show_login()
 
@@ -184,10 +205,19 @@ class MLMSApp:
         """전체 이벤트를 한 번에 로드."""
         self.session.load_all_events()
 
+    def _show_cached_week(self):
+        """현재 보고 있는 주차를 캐시로 그린다. 캐시가 아예 없으면 그대로 둔다."""
+        cached = self.session.get_cached_week(self.widget.current_week_start())
+        if cached is not None:
+            self.widget.set_classes(cached)
+            self.widget.show()
+
     def _on_week_changed(self, week_start: datetime):
         """주차 이동 — 캐시에서 즉시 표시, 캐시 없으면 네트워크 로드."""
         if not self._logged_in:
-            self.widget.set_classes([])  # stale 블록 방지
+            # 미로그인이어도 캐시로 보여준다 (클릭 시엔 기본 정보만 표시됨)
+            cached = self.session.get_cached_week(week_start)
+            self.widget.set_classes(cached if cached is not None else [])
             return
         cached = self.session.get_cached_week(week_start)
         if cached is not None:
@@ -200,17 +230,24 @@ class MLMSApp:
     def _on_events_loaded(self, all_events: list):
         """전체 이벤트 로드 완료 — 현재 보고 있는 주차만 필터링해서 표시."""
         log.info("이벤트 로드 완료 — 전체 %d개", len(all_events))
+        self._events_relogin_tried = False
         week_start = self.widget.current_week_start()
         cached = self.session.get_cached_week(week_start)
         self.widget.set_classes(cached if cached is not None else [])
 
     def _on_events_failed(self, msg: str):
         log.warning("시간표 로드 실패: %s", msg)
-        if "세션 만료" in msg and self._username and self._password:
-            log.info("세션 만료 — 재로그인 시도")
+        # 세션 만료나 빈 결과는 재로그인 후 한 번만 다시 시도한다 (무한 반복 방지).
+        retryable = "세션 만료" in msg or msg == EVENTS_EMPTY_MSG
+        if (retryable and self._username and self._password
+                and not getattr(self, "_events_relogin_tried", False)):
+            log.info("재로그인 후 시간표 다시 로드")
+            self._events_relogin_tried = True
             self._logged_in = False
             self.session.login(self._username, self._password)
             return
+        # 실패해도 기존 캐시는 남아 있으니 현재 주차를 캐시로 다시 그린다.
+        self._show_cached_week()
         self.tray.showMessage("MLMS", f"시간표 로드 실패: {msg}", QSystemTrayIcon.MessageIcon.Warning)
 
     def _refresh(self):
